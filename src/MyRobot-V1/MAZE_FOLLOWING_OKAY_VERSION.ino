@@ -1,66 +1,73 @@
-// REVISED MAZE-FOLLOWER
-
 /*
   ROBOT MAZE LOGIC — SIDE + FRONT ULTRASONIC
+  RIGHT WALL FOLLOWING
 
-  STATE 1: WALL FOLLOW
-    Conditions:
-      - robot starts here
-      - front clear: no wall detected OR front > 20 cm
-      - side wall detected: side > 0 AND side <= 60 cm
-    Action:
-      - wall following
+  STATES
+  ------
+  1) WALL FOLLOW
+     Condition:
+       - front clear: no wall detected OR front > 20 cm
+       - side wall detected: side > 0 AND side <= 60 cm
+     Action:
+       - wall follow along right wall
 
-  STATE 2: LEFT PIVOT
-    Conditions:
-      - front wall detected: front > 0 AND front <= 20 cm
-      - only if right-pivot condition is NOT active
-    Action:
-      - stop about 15 cm from wall
-      - pivot left 90 degrees
-      - resume wall follow
+  2) LEFT PIVOT
+     Condition:
+       - front wall detected: front > 0 AND front <= 20 cm
+       - side wall detected:  side > 0 AND side <= 60 cm
+     Action:
+       - stop wall following immediately
+       - move forward until front distance is about 15 cm
+       - pivot left 90 degrees
+       - resume wall follow
 
-  STATE 3: RIGHT PIVOT
-    Conditions:
-      - side wall missing: side == 0 OR side > 60 cm
-      - THIS TAKES PRIORITY OVER FRONT SENSOR
-    Action:
-      - go forward about 2 cm
-      - pivot right 90 degrees
-      - resume wall follow
+  3) RIGHT PIVOT
+     Condition:
+       - side wall missing: side == 0 OR side > 60 cm
+       - this takes priority over front sensor
+     Action:
+       - move forward a little (~2 cm, time-based)
+       - pivot right 90 degrees
+       - resume wall follow
 
-  COMMANDS:
-    w = start wall-follow mode
-    s = stop robot completely
+  COMMANDS
+  --------
+    'w' = start wall-follow mode
+    's' = stop robot completely
 */
 
 bool wallFollowMode = true;
 
-// ------------------ Wall-follow parameters ------------------
-const float WALL_SET_POINT = 16.0;   // desired side distance
-const float WALL_KP = 6.5;
+// ------------------ Wall-follow tuning ------------------
+const float WALL_SET_POINT = 14.0;   // desired right-wall distance (cm)
+const float WALL_KP = 4;
 
 const int BASE_SPEED = 160;
 const int MAX_SPEED  = 230;
 const int MIN_SPEED  = 70;
 const int DEAD_BAND  = 1;
 
-// ------------------ Required thresholds ------------------
-const int WALL_DETECTED_CM   = 60;
-const int FRONT_THRESHOLD_CM = 20;
-const int FRONT_STOP_CM      = 15;
+// ------------------ Thresholds ------------------
+const int WALL_DETECTED_CM   = 60;   // side wall exists if <= 60 cm
+const int FRONT_THRESHOLD_CM = 20;   // trigger LEFT_PIVOT if front <= 20 cm
+const int FRONT_STOP_CM      = 15;   // in LEFT_PIVOT, stop when front <= 15 cm
 
 // ------------------ Timed calibration ------------------
 // tune these on your robot
-const int FORWARD_2CM_MS    = 120;
-const int PIVOT_LEFT_90_MS  = 430;
-const int PIVOT_RIGHT_90_MS = 430;
+const int FORWARD_2CM_MS    = 120;   // approx time to move forward 2 cm
+const int PIVOT_LEFT_90_MS  = 430;   // approx left pivot 90 deg
+const int PIVOT_RIGHT_90_MS = 430;   // approx right pivot 90 deg
 
 const int TURN_SPEED  = 240;
 const int CREEP_SPEED = 110;
 
 // ------------------ State machine ------------------
-enum WFState { WF_FOLLOW, WF_LEFT_PIVOT, WF_RIGHT_PIVOT };
+enum WFState {
+  WF_FOLLOW,
+  WF_LEFT_PIVOT,
+  WF_RIGHT_PIVOT
+};
+
 WFState wfState = WF_FOLLOW;
 
 // ------------------ Motor pins ------------------
@@ -92,18 +99,26 @@ long readUltrasonicCM(int trig, int echo) {
   delayMicroseconds(10);
   digitalWrite(trig, LOW);
 
-  long d = pulseIn(echo, HIGH, 30000);
-  if (d == 0) return 0;
+  long d = pulseIn(echo, HIGH, 30000);   // 30 ms timeout
+  if (d == 0) {
+    return 0; // no echo
+  }
 
   long cm = (d / 2) / 29.1;
-  if (cm < 0) cm = 0;
+  if (cm < 0) {
+    cm = 0;
+  }
   return cm;
 }
 
 // ------------------ Helpers ------------------
 int clampPWM(int v) {
-  if (v < 0) return 0;
-  if (v > 255) return 255;
+  if (v < 0) {
+    return 0;
+  }
+  if (v > 255) {
+    return 255;
+  }
   return v;
 }
 
@@ -113,9 +128,11 @@ void stopMotors() {
 }
 
 void forward(int rightSpd, int leftSpd) {
+  // Right motor forward
   digitalWrite(in1, LOW);
   digitalWrite(in2, HIGH);
 
+  // Left motor forward
   digitalWrite(in3, LOW);
   digitalWrite(in4, HIGH);
 
@@ -123,7 +140,7 @@ void forward(int rightSpd, int leftSpd) {
   analogWrite(enB, clampPWM(leftSpd));
 }
 
-// right wheel only
+// Right wheel only forward, left stopped
 void rightWheelForwardOnly(int spd) {
   digitalWrite(in1, LOW);
   digitalWrite(in2, HIGH);
@@ -132,7 +149,7 @@ void rightWheelForwardOnly(int spd) {
   analogWrite(enB, 0);
 }
 
-// left wheel only
+// Left wheel only forward, right stopped
 void leftWheelForwardOnly(int spd) {
   digitalWrite(in3, LOW);
   digitalWrite(in4, HIGH);
@@ -141,12 +158,12 @@ void leftWheelForwardOnly(int spd) {
   analogWrite(enA, 0);
 }
 
-// pivot LEFT = move RIGHT wheel only
+// Pivot left = move right wheel only
 void pivotLeft(int spd) {
   rightWheelForwardOnly(spd);
 }
 
-// pivot RIGHT = move LEFT wheel only
+// Pivot right = move left wheel only
 void pivotRight(int spd) {
   leftWheelForwardOnly(spd);
 }
@@ -169,7 +186,7 @@ void pivotRight90() {
   stopMotors();
 }
 
-// move slowly until front sensor says robot is 15 cm away
+// In LEFT_PIVOT state: move slowly until about 15 cm from front wall
 void moveUntilFrontStopDistance() {
   while (true) {
     frontCm = readUltrasonicCM(trigFront, echoFront);
@@ -181,6 +198,8 @@ void moveUntilFrontStopDistance() {
 
     forward(CREEP_SPEED, CREEP_SPEED);
     delay(20);
+    stopMotors();
+    delay(10);
   }
 }
 
@@ -219,19 +238,19 @@ void wallFollowWithCorners() {
 
   switch (wfState) {
     case WF_FOLLOW:
-      // RIGHT PIVOT takes priority over front
+      // RIGHT PIVOT takes priority over everything else
       if (sideWallMissing) {
         wfState = WF_RIGHT_PIVOT;
         return;
       }
 
-      // LEFT PIVOT
-      if (frontWallDetected) {
+      // LEFT PIVOT only when wall in front AND wall on side
+      if (frontWallDetected && sideWallDetected) {
         wfState = WF_LEFT_PIVOT;
         return;
       }
 
-      // WALL FOLLOW
+      // Normal wall follow
       if (frontClear && sideWallDetected) {
         wallFollowControl();
       } else {
@@ -240,7 +259,7 @@ void wallFollowWithCorners() {
       return;
 
     case WF_LEFT_PIVOT:
-      // stop 15 cm in front of wall
+      // Stop wall-following immediately, then move up to 15 cm from wall
       stopMotors();
       delay(50);
 
@@ -249,26 +268,26 @@ void wallFollowWithCorners() {
       }
 
       stopMotors();
-      delay(100);
+      delay(80);
 
-      // turn 90 degrees left
+      // Then pivot left
       pivotLeft90();
       delay(100);
 
-      // resume wall following
+      // Resume wall follow
       wfState = WF_FOLLOW;
       return;
 
     case WF_RIGHT_PIVOT:
-      // go forward about 2 cm
+      // Move forward a little first
       driveForwardTimed(FORWARD_2CM_MS, BASE_SPEED, BASE_SPEED);
-      delay(100);
+      delay(80);
 
-      // turn 90 degrees right
+      // Then pivot right
       pivotRight90();
       delay(100);
 
-      // resume wall following
+      // Resume wall follow
       wfState = WF_FOLLOW;
       return;
   }
@@ -322,14 +341,30 @@ void loop() {
   }
 
   static unsigned long lastPrint = 0;
-  if (millis() - lastPrint > 200) {
-    lastPrint = millis();
 
-    Serial.print("SIDE(cm): ");
-    Serial.print(sideCm);
-    Serial.print(" | FRONT(cm): ");
-    Serial.print(frontCm);
-    Serial.print(" | state: ");
-    Serial.println((int)wfState);
+if (millis() - lastPrint > 200) {
+  lastPrint = millis();
+
+  Serial.print("SIDE: ");
+  Serial.print(sideCm);
+  Serial.print(" cm");
+
+  Serial.print(" | FRONT: ");
+  Serial.print(frontCm);
+  Serial.print(" cm");
+
+  Serial.print(" | STATE: ");
+
+  if (wfState == WF_FOLLOW) {
+    Serial.print("FOLLOW");
   }
+  else if (wfState == WF_LEFT_PIVOT) {
+    Serial.print("LEFT_PIVOT");
+  }
+  else if (wfState == WF_RIGHT_PIVOT) {
+    Serial.print("RIGHT_PIVOT");
+  }
+
+  Serial.println();
+}
 }
